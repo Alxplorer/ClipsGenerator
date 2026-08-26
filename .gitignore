@@ -1,6 +1,7 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
+# porque se genera auotomatico y cualquiera que descargue el repo lo puede tener con npm install 
 /node_modules
 /.pnp
 .pnp.*
