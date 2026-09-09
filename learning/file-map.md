@@ -19,6 +19,11 @@ una herramienta crea y que no se editan manualmente.
 | `frontend/` | Carpeta | known | Aplicación web de Next.js; Alex explicó que su posición permite distinguirla del futuro backend. |
 | `backend/` | Carpeta | parked | Aplicación Python que contendrá la API de FastAPI; hoy solo aloja el servidor de prueba. |
 | `backend/main.py` | Archivo Python | known | Punto de entrada de FastAPI; carga y valida `DATABASE_URL` desde `backend/.env`, permite CORS solo para el frontend local y expone `GET /health`, `GET /health/database` y `GET /jobs/demo`. La ruta de base de datos usa `psycopg` y `SELECT 1` para comprobar una conexión real. |
+| `backend/config.py` | Archivo Python | known | Intermediario de configuración creado por Alex: lee `backend/.env`, valida `DATABASE_URL` y entrega una variante para SQLAlchemy sin duplicar secretos. |
+| `backend/models.py` | Archivo Python | known | Describe mediante SQLAlchemy las tablas `jobs`, `transcriptions` y `clips`, incluidas sus claves primarias, foráneas y la restricción uno a uno de la transcripción. |
+| `backend/alembic.ini` | Configuración generada | parked | Configuración base de Alembic; no contiene la URL secreta, que se inyecta temporalmente desde `config.py`. |
+| `backend/migrations/` | Carpeta de migraciones | known | Infraestructura de Alembic que conecta la metadata de los modelos con PostgreSQL; guarda migraciones versionadas en `versions/`. |
+| `backend/migrations/versions/213902a44b70_create_initial_schema.py` | Migración | known | Primera migración revisada por Alex: crea `jobs`, `clips` y `transcriptions`, y puede deshacerlas en orden seguro. |
 | `backend/.env` | Configuración local secreta | known | Archivo local creado por Alex con las credenciales de PostgreSQL y `DATABASE_URL`; no se copia al código fuente ni se versiona. |
 | `backend/.gitignore` | Configuración de Git | known | Indica que `backend/.env` y la caché generada `__pycache__/` no deben entrar al historial de Git cuando el backend se versiona. |
 | `backend/.venv/` | Entorno Python generado | parked | Copia aislada de Python y sus dependencias para este backend; no se edita manualmente ni se debe versionar. |

@@ -12,5 +12,13 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    @property
+    def sqlalchemy_database_url(self) -> str:
+        return self.database_url.replace(
+            "postgresql://",
+            "postgresql+psycopg://",
+            1,
+        )
+
 
 settings = Settings()
