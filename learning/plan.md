@@ -122,19 +122,19 @@ servidor.
   instancia local aislada y una configuración sin secretos en el código fuente.
   **Resultado visible:** FastAPI puede conectarse a una base de datos PostgreSQL
   local.
-- [ ] **4.3 Crear el esquema inicial mediante migraciones.** Traducir el diseño a
+- [x] **4.3 Crear el esquema inicial mediante migraciones.** Traducir el diseño a
   tablas y versionar los cambios de estructura.
   **Resultado visible:** las tablas de trabajo, transcripción y clip aparecen en
   PostgreSQL después de ejecutar una migración.
-- [ ] **4.4 Guardar un trabajo real desde FastAPI.** Sustituir el ejemplo fijo por
+- [x] **4.4 Guardar un trabajo real desde FastAPI.** Sustituir el ejemplo fijo por
   una ruta que cree un trabajo y lo persista.
   **Resultado visible:** una solicitud crea un trabajo con identificador y estado
   en PostgreSQL.
-- [ ] **4.5 Recuperar trabajos y sus datos relacionados.** Consultar un trabajo
+- [x] **4.5 Recuperar trabajos y sus datos relacionados.** Consultar un trabajo
   por identificador y devolver su estado, transcripción y clips cuando existan.
   **Resultado visible:** FastAPI devuelve datos almacenados en vez de un ejemplo
   escrito en código.
-- [ ] **4.6 Verificar persistencia tras reiniciar.** Crear un trabajo, reiniciar
+- [x] **4.6 Verificar persistencia tras reiniciar.** Crear un trabajo, reiniciar
   FastAPI y recuperarlo de nuevo.
   **Resultado visible:** el mismo trabajo sigue existiendo tras reiniciar el
   backend.
@@ -147,6 +147,32 @@ que el trabajo y su estado siguen existiendo.
 Incorporar una cola de trabajos y un worker de Python. Primero procesará una
 tarea de prueba lenta para entender los estados, reintentos y errores antes de
 usar video real.
+
+- [ ] **5.1 Dibujar el recorrido asíncrono de un trabajo.** Decidir qué registra
+  la API, qué espera en la cola y qué actualiza el worker, incluyendo el caso de
+  error y la consulta posterior desde la web.
+  **Resultado visible:** un esquema breve permite seguir un trabajo desde
+  `POST /jobs` hasta el estado que devuelve `GET /jobs/{job_id}`.
+- [ ] **5.2 Levantar una cola local.** Elegir la herramienta mínima para la cola
+  y ejecutarla junto a PostgreSQL, separando su función de la base de datos.
+  **Resultado visible:** la API y un proceso Python pueden conectarse a la cola.
+- [ ] **5.3 Encolar un trabajo al crearlo.** Hacer que `POST /jobs` guarde el
+  trabajo y solicite su procesamiento sin esperar a que termine.
+  **Resultado visible:** la API responde enseguida y la tarea queda pendiente
+  para el worker.
+- [ ] **5.4 Procesar una tarea de prueba con un worker.** Ejecutar un proceso
+  separado que tome el trabajo, espere de forma simulada y actualice su estado
+  en PostgreSQL.
+  **Resultado visible:** el mismo `job_id` pasa de `uploaded` a un estado de
+  procesamiento y después a `ready`.
+- [ ] **5.5 Tratar fallos y reintentos básicos.** Provocar un error controlado y
+  definir qué sucede si el worker se interrumpe o recibe de nuevo el trabajo.
+  **Resultado visible:** un fallo deja un estado consultable y un reintento no
+  crea un segundo trabajo.
+- [ ] **5.6 Mostrar el progreso real en la web.** Conectar la creación y las
+  consultas periódicas del trabajo desde Next.js.
+  **Resultado visible:** la web muestra cómo cambia un trabajo real mientras
+  el procesamiento de prueba ocurre en segundo plano.
 
 **Resultado visible:** un trabajo creado en la web cambia de “pendiente” a
 “procesando” y luego a “listo” sin bloquear la aplicación.

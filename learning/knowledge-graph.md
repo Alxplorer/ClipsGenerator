@@ -18,7 +18,7 @@ evalúan de nuevo salvo que se necesiten como requisito de un concepto nuevo.
 | Arquitectura de dos lenguajes | introduced | 2026-08-20 | 2026-08-20 | Alex explicó: TypeScript para frontend y Python para backend. |
 | Next.js | introduced | 2026-08-20 | 2026-09-03 | Alex explicó la convención del App Router: `src/app/page.tsx` corresponde a `/` y `src/app/clips/page.tsx` correspondería a `/clips`. |
 | FastAPI | introduced | 2026-08-20 | 2026-09-03 | Alex explicó que `GET /jobs/demo` es una ruta conectada con `get_demo_job`, que devuelve el JSON `{\"id\": \"demo-job\", \"status\": \"uploaded\"}`. |
-| PostgreSQL | practicing | 2026-08-20 | 2026-09-07 | Alex explicó el recorrido de `GET /health/database`: FastAPI usa `DATABASE_URL`, `psycopg` conecta por `localhost:5433`, Docker redirige al PostgreSQL interno en 5432 y `SELECT 1` confirma la conexión antes de devolver JSON. |
+| PostgreSQL | practicing | 2026-08-20 | 2026-09-23 | Alex explicó el recorrido de `GET /health/database`: FastAPI usa `DATABASE_URL`, `psycopg` conecta por `localhost:5433`, Docker redirige al PostgreSQL interno en 5432 y `SELECT 1` confirma la conexión antes de devolver JSON. También creó un trabajo, reinició FastAPI y explicó que la fila persiste en PostgreSQL aunque la memoria del servidor sea temporal. |
 | Almacenamiento de archivos | introduced | 2026-08-20 | 2026-08-20 | Alex explicó que los MP4 no van a la base de datos por su peso. |
 | Hosting | introduced | 2026-08-20 | 2026-08-20 | Alex explicó que Render aloja la infraestructura sin separarla. |
 | Despliegue desde GitHub | introduced | 2026-08-20 | 2026-08-20 | Alex explicó que Render se conecta a GitHub y despliega automáticamente. |
@@ -63,8 +63,8 @@ evalúan de nuevo salvo que se necesiten como requisito de un concepto nuevo.
 | Pydantic | introduced | 2026-08-27 | 2026-08-27 | Alex ubicó `Job` como el contrato que define los datos esperados; se introdujo que Pydantic valida y da forma al JSON. |
 | SQL y modelo relacional | introduced | 2026-09-02 | 2026-09-02 | Alex separó los datos mínimos en trabajo, transcripción y clip antes de crear tablas. |
 | Tablas, filas, claves primarias y relaciones | introduced | 2026-09-02 | 2026-09-02 | Alex identificó que un clip guarda inicio/fin y que transcripción y clips usan `job_id` para pertenecer a un trabajo. |
-| ORM y migraciones de base de datos | seed | — | — | Pendiente de conectar FastAPI y PostgreSQL. |
-| Transacciones y consultas | seed | — | — | Pendiente de conectar FastAPI y PostgreSQL. |
+| ORM y migraciones de base de datos | practicing | 2026-09-23 | 2026-09-23 | Alex explicó el recorrido de `alembic upgrade head`: Alembic busca la revisión más reciente, se conecta a PostgreSQL y ejecuta la migración que crea las tablas. Verificó la revisión aplicada con `alembic current` y las tablas `jobs`, `clips`, `transcriptions` y `alembic_version` con `psql \\dt`. |
+| Transacciones y consultas | practicing | 2026-09-23 | 2026-09-23 | Alex explicó que `Session` es el espacio de trabajo temporal de SQLAlchemy, `add()` prepara la fila y `commit()` confirma el guardado. Verificó una creación con `POST /jobs` (201), consultó la fila directamente en PostgreSQL y explicó que `GET /jobs/{job_id}` busca el trabajo y filtra transcripción y clips por el mismo `job_id`. |
 | Almacenamiento de objetos y URLs temporales | seed | — | — | Pendiente de implementar subida de MP4. |
 | Redis y cola de trabajos | seed | — | — | Pendiente de implementar el worker. |
 | Estados de trabajo, reintentos e idempotencia | introduced | 2026-08-26 | 2026-08-26 | Alex modeló localmente los estados subido, transcribiendo, generando, listo y error; queda pendiente aprender reintentos e idempotencia con un worker real. |
