@@ -58,7 +58,7 @@ const initialClips: ClipProposal[] = [
 export default function Home() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [apiJob, setApiJob] = useState<ApiJob | null>(null);
-  const [apiJobRequestStatus, setApiJobRequestStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [apiJobRequestStatus, setApiJobRequestStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
   const [clips, setClips] = useState(initialClips);
   const [reviewClipId, setReviewClipId] = useState<number | null>(null);
@@ -67,35 +67,67 @@ export default function Home() {
   const [downloadMessage, setDownloadMessage] = useState<string | null>(null);
   const reviewClip = clips.find((clip) => clip.id === reviewClipId);
 
-  useEffect(() => {
-    async function loadDemoJob() {
-      try {
-        const response = await fetch('http://127.0.0.1:8000/jobs/demo');
+  async function createRealJob() {
+  if (!selectedFile) {
+    return;
+  }
 
-        if (!response.ok) {
-          throw new Error('La API no respondió correctamente.');
-        }
+  setApiJobRequestStatus('loading');
 
-        const job: ApiJob = await response.json();
-        setApiJob(job);
-        setApiJobRequestStatus('ready');
-      } catch {
-        setApiJobRequestStatus('error');
-      }
+  try {
+    const response = await fetch('http://127.0.0.1:8000/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        original_filename: selectedFile.name,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error('No se pudo crear el trabajo.');
     }
 
-    loadDemoJob();
-  }, []);
-
-function advanceJob() {
-  if (jobStatus === 'uploaded') {
-    setJobStatus('transcribing');
-  } else if (jobStatus === 'transcribing') {
-    setJobStatus('generating');
-  } else if (jobStatus === 'generating') {
-    setJobStatus('ready');
+    const job: ApiJob = await response.json();
+    setApiJob(job);
+    setJobStatus(job.status);
+    setApiJobRequestStatus('ready');
+  } catch {
+    setApiJobRequestStatus('error');
   }
 }
+
+useEffect(() => {
+  const jobId = apiJob?.id;
+  const status = apiJob?.status;
+
+  if (!jobId || status === 'ready' || status === 'error') {
+    return;
+  }
+
+  async function loadJobStatus() {
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:8000/jobs/${jobId}`,
+      );
+
+      if (!response.ok) {
+        throw new Error('No se pudo consultar el trabajo.');
+      }
+
+      const job: ApiJob = await response.json();
+      setApiJob(job);
+      setJobStatus(job.status);
+    } catch {
+      setApiJobRequestStatus('error');
+    }
+  }
+
+  const intervalId = window.setInterval(() => {
+    void loadJobStatus();
+  }, 1000);
+
+  return () => window.clearInterval(intervalId);
+}, [apiJob?.id, apiJob?.status]);
 
 function setClipDecision(id: number, decision: ClipDecision) {
   setClips((currentClips) =>
@@ -126,12 +158,16 @@ function openReview(clip: ClipProposal) {
         </p>
 
         <section className="mt-4 rounded-lg bg-violet-50 px-4 py-3 text-sm text-violet-900" aria-live="polite">
-          <p className="font-semibold">Trabajo demo desde FastAPI</p>
-          {apiJobRequestStatus === 'loading' ? <p>Cargando estado…</p> : null}
+          <p className="font-semibold">Trabajo real desde FastAPI</p>
+          {apiJobRequestStatus === 'idle' ? (
+            <p>Selecciona un MP4 para crear un trabajo real.</p>
+          ) : null}
+          {apiJobRequestStatus === 'loading' ? <p>Creando trabajo…</p> : null}
           {apiJobRequestStatus === 'error' ? <p>No se pudo obtener el estado de la API local.</p> : null}
           {apiJobRequestStatus === 'ready' && apiJob ? (
             <p>Trabajo {apiJob.id}: {statusLabels[apiJob.status]}</p>
           ) : null}
+
         </section>
 
         <div className="mt-10 rounded-2xl border-2 border-dashed border-violet-300 bg-white p-10">
@@ -157,7 +193,9 @@ function openReview(clip: ClipProposal) {
           onChange={(event) => {
           const file = event.target.files?.[0] ?? null;
           setSelectedFile(file);
-          setJobStatus(file ? 'uploaded' : null);
+          setApiJob(null);
+          setApiJobRequestStatus('idle');
+          setJobStatus(null);
           }}
         />
 
@@ -169,37 +207,30 @@ function openReview(clip: ClipProposal) {
         </label>
 
         {selectedFile ? (
-          <p className="mt-4 text-sm text-zinc-700">
-            Seleccionaste: {selectedFile.name} (
-            {(selectedFile.size / 1024 / 1024).toFixed(1)} MB)
-          </p>
-        ) : null}
+  <div className="mt-4">
+    <p className="text-sm text-zinc-700">
+      Seleccionaste: {selectedFile.name} (
+      {(selectedFile.size / 1024 / 1024).toFixed(1)} MB)
+    </p>
+
+    <button
+      type="button"
+      onClick={createRealJob}
+      disabled={apiJobRequestStatus === 'loading'}
+      className="mt-4 rounded-full bg-violet-700 px-5 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+    >
+      {apiJobRequestStatus === 'loading'
+        ? 'Creando trabajo…'
+        : 'Procesar video de prueba'}
+    </button>
+  </div>
+) : null}
 
         {jobStatus ? (
         <p className="mt-4 rounded-lg bg-violet-50 px-4 py-3 text-sm font-semibold text-violet-900">
           Estado: {statusLabels[jobStatus]}
         </p>
         ) : null}
-
-        {jobStatus !== null && jobStatus !== 'ready' && jobStatus !== 'error' ? (
-  <div className="mt-4 flex justify-center gap-3">
-    <button
-      type="button"
-      onClick={advanceJob}
-      className="rounded-full bg-violet-700 px-4 py-2 text-sm font-semibold text-white"
-    >
-      Simular siguiente paso
-    </button>
-
-    <button
-      type="button"
-      onClick={() => setJobStatus('error')}
-      className="rounded-full border border-red-300 px-4 py-2 text-sm font-semibold text-red-700"
-    >
-      Simular error
-    </button>
-  </div>
-) : null}
 
         </div>
         {jobStatus === 'ready' ? (

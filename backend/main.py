@@ -6,6 +6,7 @@ from pydantic import BaseModel
 import psycopg
 from config import settings
 from uuid import uuid4
+from redis import Redis
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -16,15 +17,15 @@ from models import Transcription as TranscriptionRecord
 
 app = FastAPI()
 engine = create_engine(settings.sqlalchemy_database_url)
+redis_client = Redis.from_url(settings.redis_url)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=False,
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=[],
     )
-
 
 class Job(BaseModel):
     id: str
@@ -66,8 +67,9 @@ def database_health() -> dict[str, str]:
 
 @app.post("/jobs", response_model=Job, status_code=201)
 def create_job(request: CreateJobRequest) -> Job:
+    job_id = str(uuid4())
     job = JobRecord(
-        id=str(uuid4()),
+        id=job_id,
         original_filename=request.original_filename,
         status="uploaded",
     )
@@ -75,7 +77,9 @@ def create_job(request: CreateJobRequest) -> Job:
     with Session(engine) as session:
         session.add(job)
         session.commit()
-        return Job(id=job.id, status=job.status)
+
+    redis_client.rpush("jobs", job_id)
+    return Job(id=job_id, status="uploaded")
 
 @app.get("/jobs/{job_id}", response_model=JobDetail)
 def get_job(job_id: str) -> JobDetail:
@@ -120,3 +124,28 @@ def get_job(job_id: str) -> JobDetail:
             transcription=transcription,
             clips=clips,
         )
+
+@app.get("/health/queue")
+def queue_health() -> dict[str, str]:
+    redis_client.ping()
+    return {"status": "ok"}
+
+@app.post("/jobs/{job_id}/retry", response_model=Job)
+def retry_job(job_id: str) -> Job:
+    with Session(engine) as session:
+        job = session.get(JobRecord, job_id)
+
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        if job.status != "error":
+            raise HTTPException(
+                status_code=409,
+                detail="Only failed jobs can be retried",
+            )
+
+        job.status = "uploaded"
+        session.commit()
+
+    redis_client.rpush("jobs", job_id)
+    return Job(id=job_id, status="uploaded")
