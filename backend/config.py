@@ -1,10 +1,12 @@
 from pathlib import Path
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     database_url: str
     redis_url: str
+    openai_api_key: SecretStr
 
     model_config = SettingsConfigDict(
         env_file=Path(__file__).with_name(".env"),

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 
 type JobStatus = 'uploaded' | 'transcribing' | 'generating' | 'ready' | 'error';
 
@@ -59,6 +59,7 @@ export default function Home() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [apiJob, setApiJob] = useState<ApiJob | null>(null);
   const [apiJobRequestStatus, setApiJobRequestStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [apiJobError, setApiJobError] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
   const [clips, setClips] = useState(initialClips);
   const [reviewClipId, setReviewClipId] = useState<number | null>(null);
@@ -67,32 +68,45 @@ export default function Home() {
   const [downloadMessage, setDownloadMessage] = useState<string | null>(null);
   const reviewClip = clips.find((clip) => clip.id === reviewClipId);
 
-  async function createRealJob() {
-  if (!selectedFile) {
+ async function createRealJob(event: FormEvent<HTMLFormElement>) {
+  event.preventDefault();
+
+  const formData = new FormData(event.currentTarget);
+  const file = formData.get('file');
+
+  if (!(file instanceof File) || file.size === 0) {
+    setApiJobRequestStatus('error');
+    setApiJobError('Selecciona un archivo MP4 antes de procesarlo.');
     return;
   }
 
+  setSelectedFile(file);
   setApiJobRequestStatus('loading');
+  setApiJobError(null);
 
   try {
-    const response = await fetch('http://127.0.0.1:8000/jobs', {
+    const response = await fetch('http://localhost:8000/jobs/upload', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        original_filename: selectedFile.name,
-      }),
+      body: formData,
     });
 
     if (!response.ok) {
-      throw new Error('No se pudo crear el trabajo.');
+      const errorResponse = (await response.json()) as { detail?: string };
+
+      throw new Error(
+        errorResponse.detail ?? 'No se pudo subir el video.',
+      );
     }
 
     const job: ApiJob = await response.json();
     setApiJob(job);
     setJobStatus(job.status);
     setApiJobRequestStatus('ready');
-  } catch {
+  } catch (error) {
     setApiJobRequestStatus('error');
+    setApiJobError(
+      error instanceof Error ? error.message : 'No se pudo subir el video.',
+    );
   }
 }
 
@@ -107,7 +121,7 @@ useEffect(() => {
   async function loadJobStatus() {
     try {
       const response = await fetch(
-        `http://127.0.0.1:8000/jobs/${jobId}`,
+        `http://localhost:8000/jobs/${jobId}`,
       );
 
       if (!response.ok) {
@@ -163,7 +177,9 @@ function openReview(clip: ClipProposal) {
             <p>Selecciona un MP4 para crear un trabajo real.</p>
           ) : null}
           {apiJobRequestStatus === 'loading' ? <p>Creando trabajo…</p> : null}
-          {apiJobRequestStatus === 'error' ? <p>No se pudo obtener el estado de la API local.</p> : null}
+          {apiJobRequestStatus === 'error' ? (
+            <p>{apiJobError ?? 'No se pudo subir el video.'}</p>
+          ) : null}
           {apiJobRequestStatus === 'ready' && apiJob ? (
             <p>Trabajo {apiJob.id}: {statusLabels[apiJob.status]}</p>
           ) : null}
@@ -185,46 +201,43 @@ function openReview(clip: ClipProposal) {
             Arrastra el archivo aquí o selecciónalo desde tu computadora.
           </p>
 
-          <input
-          id="video-upload"
-          type="file"
-          accept="video/mp4"
-          className="sr-only"
-          onChange={(event) => {
-          const file = event.target.files?.[0] ?? null;
-          setSelectedFile(file);
-          setApiJob(null);
-          setApiJobRequestStatus('idle');
-          setJobStatus(null);
-          }}
-        />
+          <form className="mt-6" onSubmit={createRealJob}>
+            <input
+              id="video-upload"
+              name="file"
+              type="file"
+              accept="video/mp4"
+              className="block w-full rounded-lg border border-violet-300 bg-white p-3 text-sm"
+              onClick={(event) => {
+                event.currentTarget.value = '';
+              }}
+              onChange={(event) => {
+                const file = event.target.files?.[0] ?? null;
+                setSelectedFile(file);
+                setApiJob(null);
+                setApiJobRequestStatus('idle');
+                setApiJobError(null);
+                setJobStatus(null);
+              }}
+            />
 
-        <label
-          htmlFor="video-upload"
-          className="mt-6 inline-block cursor-pointer rounded-full bg-violet-700 px-5 py-3 font-semibold text-white"
-        >
-          Seleccionar video
-        </label>
+            <button
+              type="submit"
+              disabled={apiJobRequestStatus === 'loading'}
+              className="mt-4 rounded-full bg-violet-700 px-5 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {apiJobRequestStatus === 'loading'
+                ? 'Subiendo video…'
+                : 'Procesar video'}
+            </button>
+          </form>
 
-        {selectedFile ? (
-  <div className="mt-4">
-    <p className="text-sm text-zinc-700">
-      Seleccionaste: {selectedFile.name} (
-      {(selectedFile.size / 1024 / 1024).toFixed(1)} MB)
-    </p>
-
-    <button
-      type="button"
-      onClick={createRealJob}
-      disabled={apiJobRequestStatus === 'loading'}
-      className="mt-4 rounded-full bg-violet-700 px-5 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
-    >
-      {apiJobRequestStatus === 'loading'
-        ? 'Creando trabajo…'
-        : 'Procesar video de prueba'}
-    </button>
-  </div>
-) : null}
+          {selectedFile ? (
+            <p className="mt-4 text-sm text-zinc-700">
+              Seleccionaste: {selectedFile.name} (
+              {(selectedFile.size / 1024 / 1024).toFixed(1)} MB)
+            </p>
+          ) : null}
 
         {jobStatus ? (
         <p className="mt-4 rounded-lg bg-violet-50 px-4 py-3 text-sm font-semibold text-violet-900">
