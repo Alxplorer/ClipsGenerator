@@ -44,3 +44,6 @@ class Clip(Base):
     start_seconds: Mapped[float] = mapped_column(Float)
     end_seconds: Mapped[float] = mapped_column(Float)
     decision: Mapped[str] = mapped_column(String(20))
+    adjustment_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    adjustment_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    rendered_video_path: Mapped[str | None] = mapped_column(String(512), nullable=True)

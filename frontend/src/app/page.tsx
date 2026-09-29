@@ -18,42 +18,42 @@ const statusLabels: Record<JobStatus, string> = {
 };
 
 type ClipDecision = 'pending' | 'accepted' | 'discarded';
+type AdjustmentStatus = 'queued' | 'rendering' | 'ready' | 'error';
+
+const adjustmentLabels: Record<AdjustmentStatus, string> = {
+  queued: 'Ajuste en cola',
+  rendering: 'Generando el clip ajustado…',
+  ready: 'Ajuste listo para reproducir y descargar',
+  error: 'El ajuste falló. La versión anterior sigue disponible.',
+};
+
+type ApiClip = {
+  id: string;
+  title: string;
+  editorial_reason: string;
+  start_seconds: number;
+  end_seconds: number;
+  decision: ClipDecision;
+  adjustment_id: string | null;
+  adjustment_status: AdjustmentStatus | null;
+};
+
+type ApiJobDetail = ApiJob & {
+  clips: ApiClip[];
+};
 
 type ClipProposal = {
-  id: number;
+  id: string;
   title: string;
   duration: string;
   reason: string;
   decision: ClipDecision,
   durationSeconds: number;
+  startSeconds: number;
+  endSeconds: number;
+  adjustmentId: string | null;
+  adjustmentStatus: AdjustmentStatus | null;
 };
-
-const initialClips: ClipProposal[] = [
-  {
-    id: 1,
-    title: 'El hábito que cambió nuestra audiencia',
-    duration: '00:42',
-    reason: 'Una idea práctica y fácil de compartir.',
-    decision: 'pending',
-    durationSeconds: 42,
-  },
-  {
-    id: 2,
-    title: 'Por qué dejamos de perseguir viralidad',
-    duration: '00:31',
-    reason: 'Una opinión clara que abre conversación.',
-    decision: 'pending',
-    durationSeconds: 31,
-  },
-  {
-    id: 3,
-    title: 'La pregunta que mejora cada entrevista',
-    duration: '00:55',
-    reason: 'Un consejo concreto para otros podcasters.',
-    decision: 'pending',
-    durationSeconds: 55,
-  },
-];
 
 export default function Home() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -61,12 +61,21 @@ export default function Home() {
   const [apiJobRequestStatus, setApiJobRequestStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [apiJobError, setApiJobError] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
-  const [clips, setClips] = useState(initialClips);
-  const [reviewClipId, setReviewClipId] = useState<number | null>(null);
+  const [clips, setClips] = useState<ClipProposal[]>([]);
+  const [reviewClipId, setReviewClipId] = useState<string | null>(null);
+  const [savingClipId, setSavingClipId] = useState<string | null>(null);
+  const [clipDecisionError, setClipDecisionError] = useState<string | null>(null);
   const [reviewStart, setReviewStart] = useState(0);
   const [reviewEnd, setReviewEnd] = useState(0);
-  const [downloadMessage, setDownloadMessage] = useState<string | null>(null);
+  const [savingAdjustmentId, setSavingAdjustmentId] = useState<string | null>(null);
+  const [adjustmentError, setAdjustmentError] = useState<string | null>(null);
   const reviewClip = clips.find((clip) => clip.id === reviewClipId);
+  const hasPendingAdjustments = clips.some(
+    (clip) => clip.adjustmentStatus === 'queued' || clip.adjustmentStatus === 'rendering',
+  );
+  const reviewAdjustmentStatus = reviewClip?.adjustmentStatus;
+  const isReviewBusy = savingAdjustmentId !== null
+    || reviewAdjustmentStatus === 'queued' || reviewAdjustmentStatus === 'rendering';
 
  async function createRealJob(event: FormEvent<HTMLFormElement>) {
   event.preventDefault();
@@ -80,7 +89,17 @@ export default function Home() {
     return;
   }
 
+  const pageUrl = new URL(window.location.href);
+  pageUrl.searchParams.delete('job');
+  window.history.replaceState(null, '', pageUrl);
+
   setSelectedFile(file);
+  setApiJob(null);
+  setJobStatus(null);
+  setClips([]);
+  setReviewClipId(null);
+  setClipDecisionError(null);
+  setAdjustmentError(null);
   setApiJobRequestStatus('loading');
   setApiJobError(null);
 
@@ -99,6 +118,8 @@ export default function Home() {
     }
 
     const job: ApiJob = await response.json();
+    pageUrl.searchParams.set('job', job.id);
+    window.history.replaceState(null, '', pageUrl);
     setApiJob(job);
     setJobStatus(job.status);
     setApiJobRequestStatus('ready');
@@ -111,12 +132,14 @@ export default function Home() {
 }
 
 useEffect(() => {
-  const jobId = apiJob?.id;
+  const jobId = apiJob?.id ?? new URLSearchParams(window.location.search).get('job');
   const status = apiJob?.status;
 
-  if (!jobId || status === 'ready' || status === 'error') {
+  if (!jobId || (status === 'ready' && !hasPendingAdjustments) || status === 'error') {
     return;
   }
+
+  let isActive = true;
 
   async function loadJobStatus() {
     try {
@@ -128,11 +151,51 @@ useEffect(() => {
         throw new Error('No se pudo consultar el trabajo.');
       }
 
-      const job: ApiJob = await response.json();
+      const job: ApiJobDetail = await response.json();
+      if (!isActive) return;
+
       setApiJob(job);
       setJobStatus(job.status);
+      setApiJobRequestStatus('ready');
+      setApiJobError(null);
+      setAdjustmentError(null);
+
+      if (job.status === 'ready') {
+        const updatedReviewClip = job.clips.find((clip) => clip.id === reviewClipId);
+        if (
+          (reviewAdjustmentStatus === 'queued' || reviewAdjustmentStatus === 'rendering')
+          && updatedReviewClip?.adjustment_status === 'ready'
+        ) {
+          setReviewStart(0);
+          setReviewEnd(updatedReviewClip.end_seconds - updatedReviewClip.start_seconds);
+        }
+
+        setClips(job.clips.map((clip) => {
+          const durationSeconds = clip.end_seconds - clip.start_seconds;
+
+          return {
+            id: clip.id,
+            title: clip.title,
+            reason: clip.editorial_reason,
+            duration: `${durationSeconds.toFixed(1)} s`,
+            durationSeconds,
+            startSeconds: clip.start_seconds,
+            endSeconds: clip.end_seconds,
+            adjustmentId: clip.adjustment_id,
+            adjustmentStatus: clip.adjustment_status,
+            decision: clip.decision,
+          };
+        }));
+      }
     } catch {
+      if (!isActive) return;
+      if (hasPendingAdjustments) {
+        setAdjustmentError('No se pudo consultar el ajuste. Volveremos a intentarlo.');
+        return;
+      }
+      window.clearInterval(intervalId);
       setApiJobRequestStatus('error');
+      setApiJobError('No se pudo consultar el trabajo. Comprueba el enlace e inténtalo de nuevo.');
     }
   }
 
@@ -140,22 +203,108 @@ useEffect(() => {
     void loadJobStatus();
   }, 1000);
 
-  return () => window.clearInterval(intervalId);
-}, [apiJob?.id, apiJob?.status]);
+  void loadJobStatus();
 
-function setClipDecision(id: number, decision: ClipDecision) {
-  setClips((currentClips) =>
-    currentClips.map((clip) =>
-      clip.id === id ? { ...clip, decision } : clip,
-    ),
+  return () => {
+    isActive = false;
+    window.clearInterval(intervalId);
+  };
+}, [apiJob?.id, apiJob?.status, hasPendingAdjustments, reviewClipId, reviewAdjustmentStatus]);
+
+async function setClipDecision(id: string, decision: 'accepted' | 'discarded') {
+  if (!apiJob || savingClipId !== null) return;
+
+  setSavingClipId(id);
+  setClipDecisionError(null);
+
+  try {
+    const response = await fetch(
+      `http://localhost:8000/jobs/${apiJob.id}/clips/${id}/decision`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision }),
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error('No se pudo guardar la decisión. Inténtalo de nuevo.');
+    }
+
+    const saved: { id: string; decision: ClipDecision } = await response.json();
+    setClips((currentClips) =>
+      currentClips.map((clip) =>
+        clip.id === saved.id ? { ...clip, decision: saved.decision } : clip,
+      ),
+    );
+  } catch (error) {
+    setClipDecisionError(
+      error instanceof Error ? error.message : 'No se pudo guardar la decisión.',
+    );
+  } finally {
+    setSavingClipId(null);
+  }
+}
+
+async function saveClipAdjustment() {
+  if (!apiJob || !reviewClip || isReviewBusy) return;
+
+  const startSeconds = reviewClip.startSeconds + reviewStart;
+  const endSeconds = Math.min(
+    reviewClip.endSeconds,
+    reviewClip.startSeconds + reviewEnd,
   );
+  if (endSeconds <= startSeconds) {
+    setAdjustmentError('El fin debe quedar después del inicio.');
+    return;
+  }
+
+  setSavingAdjustmentId(reviewClip.id);
+  setAdjustmentError(null);
+
+  try {
+    const response = await fetch(
+      `http://localhost:8000/jobs/${apiJob.id}/clips/${reviewClip.id}/trim`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          start_seconds: startSeconds,
+          end_seconds: endSeconds,
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      const errorResponse = (await response.json()) as { detail?: unknown };
+      throw new Error(
+        typeof errorResponse.detail === 'string'
+          ? errorResponse.detail
+          : 'No se pudo solicitar el ajuste. Inténtalo de nuevo.',
+      );
+    }
+
+    const queued: { id: string; adjustment_id: string; status: 'queued' } =
+      await response.json();
+    setClips((currentClips) => currentClips.map((clip) =>
+      clip.id === queued.id
+        ? { ...clip, adjustmentId: queued.adjustment_id, adjustmentStatus: queued.status }
+        : clip,
+    ));
+  } catch (error) {
+    setAdjustmentError(
+      error instanceof Error ? error.message : 'No se pudo solicitar el ajuste.',
+    );
+  } finally {
+    setSavingAdjustmentId(null);
+  }
 }
 
 function openReview(clip: ClipProposal) {
   setReviewClipId(clip.id);
   setReviewStart(0);
   setReviewEnd(clip.durationSeconds);
-  setDownloadMessage(null);
+  setAdjustmentError(null);
 }
 
   return (
@@ -223,7 +372,7 @@ function openReview(clip: ClipProposal) {
 
             <button
               type="submit"
-              disabled={apiJobRequestStatus === 'loading'}
+              disabled={apiJobRequestStatus === 'loading' || savingClipId !== null}
               className="mt-4 rounded-full bg-violet-700 px-5 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
             >
               {apiJobRequestStatus === 'loading'
@@ -252,6 +401,9 @@ function openReview(clip: ClipProposal) {
     <p className="mt-2 text-zinc-600">
       Revisa cada propuesta y decide cuáles quieres conservar.
     </p>
+    {clipDecisionError ? (
+      <p role="alert" className="mt-3 text-sm text-red-700">{clipDecisionError}</p>
+    ) : null}
 
     <div className="mt-5 space-y-4">
       {clips.map((clip) => (
@@ -277,23 +429,44 @@ function openReview(clip: ClipProposal) {
           </div>
 
           <p className="mt-4 text-sm text-zinc-600">{clip.reason}</p>
+          {clip.adjustmentStatus ? (
+            <p className="mt-2 text-sm text-violet-700" role="status">
+              {adjustmentLabels[clip.adjustmentStatus]}
+            </p>
+          ) : null}
+          <video
+            controls
+            playsInline
+            preload="metadata"
+            aria-label={`Vista previa de ${clip.title}`}
+            src={`http://localhost:8000/jobs/${apiJob?.id}/clips/${clip.id}/video?version=${clip.startSeconds}-${clip.endSeconds}`}
+            className="mx-auto my-4 aspect-[9/16] w-full max-w-xs rounded-lg bg-black"
+          >
+            Tu navegador no admite la reproducción de video.
+          </video>
             <button
     type="button"
-    onClick={() => setClipDecision(clip.id, 'accepted')}
-    className="rounded-full bg-emerald-600 px-4 py-2 text-sm font-semibold text-white"
+    onClick={() => void setClipDecision(clip.id, 'accepted')}
+    disabled={savingClipId !== null}
+    className="rounded-full bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
   >
     Aceptar
   </button>
 
   <button
     type="button"
-    onClick={() => setClipDecision(clip.id, 'discarded')}
-    className="rounded-full border border-red-300 px-4 py-2 text-sm font-semibold text-red-700"
+    onClick={() => void setClipDecision(clip.id, 'discarded')}
+    disabled={savingClipId !== null}
+    className="rounded-full border border-red-300 px-4 py-2 text-sm font-semibold text-red-700 disabled:opacity-50"
   >
     Descartar
   </button>
+  {savingClipId === clip.id ? (
+    <p role="status" className="mt-2 text-sm text-zinc-600">Guardando decisión…</p>
+  ) : null}
 
   {clip.decision === 'accepted' ? (
+  <>
   <button
     type="button"
     onClick={() => openReview(clip)}
@@ -301,6 +474,15 @@ function openReview(clip: ClipProposal) {
   >
     Revisar clip
   </button>
+  <a
+    href={`http://localhost:8000/jobs/${apiJob?.id}/clips/${clip.id}/video?download=true&version=${clip.startSeconds}-${clip.endSeconds}`}
+    className="ml-3 inline-block rounded-full border border-violet-300 px-4 py-2 text-sm font-semibold text-violet-700"
+  >
+    {clip.adjustmentStatus === 'queued' || clip.adjustmentStatus === 'rendering'
+      ? 'Descargar versión actual'
+      : 'Descargar clip'}
+  </a>
+  </>
 ) : null}
         </article>
       ))}
@@ -310,52 +492,63 @@ function openReview(clip: ClipProposal) {
 
 {reviewClip && reviewClip.decision === 'accepted' ? (
   <section className="mt-10 rounded-xl border border-violet-200 bg-violet-50 p-6 text-left">
-    <p className="text-sm font-semibold text-violet-700">Revisión simulada</p>
+    <p className="text-sm font-semibold text-violet-700">Revisión del clip</p>
     <h2 className="mt-2 text-2xl font-bold">{reviewClip.title}</h2>
 
     <div className="mt-6 space-y-5">
       <label className="block font-semibold">
-        Inicio: {reviewStart}s
+        Inicio dentro del clip: {reviewStart.toFixed(2)} s
         <input
           type="range"
           min="0"
           max={reviewEnd - 1}
           value={reviewStart}
+          step="0.01"
+          disabled={isReviewBusy}
           onChange={(event) => setReviewStart(Number(event.target.value))}
           className="mt-2 w-full"
         />
       </label>
 
       <label className="block font-semibold">
-        Fin: {reviewEnd}s
+        Fin dentro del clip: {reviewEnd.toFixed(2)} s
         <input
           type="range"
           min={reviewStart + 1}
           max={reviewClip.durationSeconds}
           value={reviewEnd}
+          step="0.01"
+          disabled={isReviewBusy}
           onChange={(event) => setReviewEnd(Number(event.target.value))}
           className="mt-2 w-full"
         />
       </label>
     </div>
 
-    <button
-      type="button"
-      onClick={() =>
-        setDownloadMessage(
-          'Simulación: el MP4 final todavía no se generó ni se descargó.',
-        )
-      }
-      className="mt-6 rounded-full bg-violet-700 px-5 py-3 font-semibold text-white"
-    >
-      Descargar clip (simulado)
-    </button>
-
-    {downloadMessage ? (
-      <p className="mt-4 text-sm text-violet-900" role="status">
-        {downloadMessage}
+    {reviewClip.adjustmentStatus ? (
+      <p className="mt-4 text-sm text-violet-700" role="status">
+        {adjustmentLabels[reviewClip.adjustmentStatus]}
       </p>
     ) : null}
+    {adjustmentError ? (
+      <p className="mt-4 text-sm text-red-700" role="alert">{adjustmentError}</p>
+    ) : null}
+
+    <button
+      type="button"
+      onClick={() => void saveClipAdjustment()}
+      disabled={isReviewBusy || (reviewStart === 0 && reviewEnd === reviewClip.durationSeconds)}
+      className="mt-6 rounded-full bg-violet-700 px-5 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+    >
+      {savingAdjustmentId === reviewClip.id ? 'Enviando ajuste…' : 'Guardar ajuste'}
+    </button>
+
+    <a
+      href={`http://localhost:8000/jobs/${apiJob?.id}/clips/${reviewClip.id}/video?download=true&version=${reviewClip.startSeconds}-${reviewClip.endSeconds}`}
+      className="ml-3 inline-block rounded-full border border-violet-300 px-5 py-3 font-semibold text-violet-700"
+    >
+      {isReviewBusy ? 'Descargar versión actual' : 'Descargar clip'}
+    </a>
   </section>
 ) : null}
 

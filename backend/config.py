@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     database_url: str
     redis_url: str
     openai_api_key: SecretStr
+    ffmpeg_path: str = "ffmpeg"
+    ffprobe_path: str = "ffprobe"
 
     model_config = SettingsConfigDict(
         env_file=Path(__file__).with_name(".env"),

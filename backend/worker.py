@@ -1,12 +1,13 @@
 from pathlib import Path
+from typing import Literal
 import subprocess
 import json
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from uuid import uuid4
 
 from openai import OpenAI
 from redis import Redis
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import Session
 
 from config import settings
@@ -21,6 +22,16 @@ MIN_CLIP_SECONDS = 20
 TARGET_CLIP_SECONDS = 35
 MAX_CLIP_SECONDS = 60
 MAX_CANDIDATES = 60
+
+
+class ClipAdjustmentTask(BaseModel):
+    type: Literal["trim_clip"]
+    job_id: str
+    clip_id: str
+    adjustment_id: str
+    start_seconds: float = Field(ge=0, allow_inf_nan=False)
+    end_seconds: float = Field(ge=0, allow_inf_nan=False)
+
 
 class ClipSuggestion(BaseModel):
     candidate_id: str
@@ -225,7 +236,7 @@ def render_clip(
     try:
         subprocess.run(
             [
-                "ffmpeg",
+                settings.ffmpeg_path,
                 "-hide_banner",
                 "-loglevel", "error",
                 "-y",
@@ -261,7 +272,7 @@ def ensure_audio_stream(source_video_path: Path) -> None:
     try:
         result = subprocess.run(
             [
-                "ffprobe",
+                settings.ffprobe_path,
                 "-v",
                 "error",
                 "-select_streams",
@@ -290,7 +301,7 @@ def extract_audio(source_video_path: Path) -> Path:
     try:
         subprocess.run(
             [
-                "ffmpeg",
+                settings.ffmpeg_path,
                 "-y",
                 "-i",
                 str(source_video_path),
@@ -356,6 +367,50 @@ def transcribe_video(source_video_path: str) -> tuple[str, list[dict[str, float 
         for segment in result.segments or []
     ]
     return result.text, segments
+
+
+def render_clip_adjustment(
+    job_id: str,
+    clip_id: str,
+    start_seconds: float,
+    end_seconds: float,
+) -> Path:
+    with Session(engine) as session:
+        job = session.get(JobRecord, job_id)
+        clip = session.get(ClipRecord, clip_id)
+
+        if job is None or clip is None or clip.job_id != job_id:
+            raise LookupError("No se encontró el clip del trabajo indicado.")
+
+        if not (
+            0 <= clip.start_seconds <= start_seconds
+            < end_seconds <= clip.end_seconds
+        ):
+            raise ValueError("El ajuste debe quedar dentro del intervalo actual del clip.")
+
+        transcription = session.scalar(
+            select(TranscriptionRecord).where(
+                TranscriptionRecord.job_id == job_id
+            )
+        )
+        if transcription is None or not transcription.segments:
+            raise ValueError("El trabajo no tiene segmentos de transcripción guardados.")
+
+        if job.source_video_path is None:
+            raise FileNotFoundError("El trabajo no tiene una ruta de video.")
+
+        source_video_path = Path(job.source_video_path)
+        segments = transcription.segments
+
+    return render_clip(
+        source_video_path=source_video_path,
+        segments=segments,
+        clip_start=start_seconds,
+        clip_end=end_seconds,
+        output_directory=(
+            source_video_path.parent / "clips" / clip_id / "adjustment" / str(uuid4())
+        ),
+    )
 
 
 def process_job(job_id: str) -> None:
@@ -447,16 +502,85 @@ def process_job(job_id: str) -> None:
 
         print(f"El trabajo {job_id} falló: {error}")
 
+def process_clip_adjustment(payload: bytes) -> None:
+    task = None
+    try:
+        task = ClipAdjustmentTask.model_validate_json(payload)
+        with Session(engine) as session:
+            result = session.execute(
+                update(ClipRecord)
+                .where(
+                    ClipRecord.id == task.clip_id,
+                    ClipRecord.job_id == task.job_id,
+                    ClipRecord.adjustment_id == task.adjustment_id,
+                    ClipRecord.adjustment_status == "queued",
+                )
+                .values(adjustment_status="rendering")
+            )
+            session.commit()
+            if result.rowcount != 1:
+                print(f"Se ignoró un ajuste antiguo o ya procesado: {task.adjustment_id}")
+                return
+
+        output = render_clip_adjustment(
+            job_id=task.job_id,
+            clip_id=task.clip_id,
+            start_seconds=task.start_seconds,
+            end_seconds=task.end_seconds,
+        )
+        if not output.is_file():
+            raise FileNotFoundError("No se generó el MP4 ajustado.")
+
+        with Session(engine) as session:
+            session.execute(
+                update(ClipRecord)
+                .where(
+                    ClipRecord.id == task.clip_id,
+                    ClipRecord.adjustment_id == task.adjustment_id,
+                    ClipRecord.adjustment_status == "rendering",
+                )
+                .values(
+                    adjustment_status="ready",
+                    rendered_video_path=str(output.resolve()),
+                    start_seconds=task.start_seconds,
+                    end_seconds=task.end_seconds,
+                )
+            )
+            session.commit()
+        print(f"El ajuste del clip {task.clip_id} se generó en {output}")
+    except Exception as error:
+        if task is not None:
+            try:
+                with Session(engine) as session:
+                    session.execute(
+                        update(ClipRecord)
+                        .where(
+                            ClipRecord.id == task.clip_id,
+                            ClipRecord.job_id == task.job_id,
+                            ClipRecord.adjustment_id == task.adjustment_id,
+                            ClipRecord.adjustment_status.in_(["queued", "rendering"]),
+                        )
+                        .values(adjustment_status="error")
+                    )
+                    session.commit()
+            except Exception as state_error:
+                print(f"No se pudo guardar el error del ajuste: {state_error}")
+        print(f"El ajuste de clip falló: {error}")
+
+
 def run_worker() -> None:
     while True:
-        queued_job = redis_client.blpop("jobs", timeout=1)
+        queued_task = redis_client.blpop(["jobs", "clip_adjustments"], timeout=1)
 
-        if queued_job is None:
+        if queued_task is None:
             continue
 
-        _, job_id_as_bytes = queued_job
-        job_id = job_id_as_bytes.decode("utf-8")
-        process_job(job_id)
+        queue_name, payload = queued_task
+        if queue_name == b"jobs":
+            job_id = payload.decode("utf-8")
+            process_job(job_id)
+        else:
+            process_clip_adjustment(payload)
 
 
 if __name__ == "__main__":
