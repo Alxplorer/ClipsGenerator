@@ -1,5 +1,8 @@
 from pathlib import Path
+from contextlib import nullcontext
+from tempfile import TemporaryDirectory
 from typing import Literal
+from datetime import datetime, timedelta, timezone
 import subprocess
 import json
 from pydantic import BaseModel, Field
@@ -11,17 +14,79 @@ from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import Session
 
 from config import settings
+from cleanup import remove_expired_job_directories, remove_expired_r2_jobs
 from models import Job as JobRecord
 from models import Transcription as TranscriptionRecord
 from models import Clip as ClipRecord
+from object_storage import R2Storage, clip_object_key
 
 engine = create_engine(settings.sqlalchemy_database_url)
 redis_client = Redis.from_url(settings.redis_url)
+r2_storage: R2Storage | None = None
+if settings.r2_configured:
+    r2_storage = R2Storage.connect(
+        account_id=settings.r2_account_id,
+        bucket_name=settings.r2_bucket_name,
+        access_key_id=settings.r2_access_key_id.get_secret_value(),
+        secret_access_key=settings.r2_secret_access_key.get_secret_value(),
+    )
 MAX_TRANSCRIPTION_BYTES = 25 * 1024 * 1024
 MIN_CLIP_SECONDS = 20
 TARGET_CLIP_SECONDS = 35
 MAX_CLIP_SECONDS = 60
 MAX_CANDIDATES = 60
+
+
+def error_kind(error: Exception) -> str:
+    return type(error).__name__
+
+
+def local_source_video(
+    source_video_key: str | None,
+    source_video_path: str | None,
+    work_directory: Path,
+) -> Path:
+    if source_video_key is not None:
+        if r2_storage is None:
+            raise RuntimeError("El worker no tiene configurado R2.")
+        work_directory.mkdir(parents=True, exist_ok=True)
+        local_path = work_directory / "original.mp4"
+        r2_storage.download_file(source_video_key, local_path)
+        return local_path
+
+    if source_video_path is None:
+        raise FileNotFoundError("El trabajo no tiene un video original.")
+    return Path(source_video_path)
+
+
+def publish_clip_assets(
+    job_id: str,
+    clip_id: str,
+    output_path: Path,
+    adjustment_id: str | None = None,
+) -> str | None:
+    if r2_storage is None:
+        return None
+
+    video_key = clip_object_key(job_id, clip_id, "clip.mp4", adjustment_id)
+    subtitles_key = clip_object_key(job_id, clip_id, "subtitles.srt", adjustment_id)
+    uploaded_keys = []
+    try:
+        for local_path, key in (
+            (output_path.with_name("subtitles.srt"), subtitles_key),
+            (output_path, video_key),
+        ):
+            uploaded_keys.append(key)
+            r2_storage.upload_file(local_path, key)
+    except Exception:
+        for key in uploaded_keys:
+            try:
+                r2_storage.delete_object(key)
+            except Exception as cleanup_error:
+                print(f"No se pudo limpiar un objeto R2: {error_kind(cleanup_error)}")
+        raise
+
+    return video_key
 
 
 class ClipAdjustmentTask(BaseModel):
@@ -374,6 +439,7 @@ def render_clip_adjustment(
     clip_id: str,
     start_seconds: float,
     end_seconds: float,
+    work_directory: Path | None = None,
 ) -> Path:
     with Session(engine) as session:
         job = session.get(JobRecord, job_id)
@@ -396,24 +462,36 @@ def render_clip_adjustment(
         if transcription is None or not transcription.segments:
             raise ValueError("El trabajo no tiene segmentos de transcripción guardados.")
 
-        if job.source_video_path is None:
-            raise FileNotFoundError("El trabajo no tiene una ruta de video.")
-
-        source_video_path = Path(job.source_video_path)
+        source_video_key = job.source_video_key
+        source_video_path = job.source_video_path
         segments = transcription.segments
 
+    if work_directory is None:
+        if source_video_key is not None:
+            raise ValueError("El ajuste de R2 necesita una carpeta temporal.")
+        if source_video_path is None:
+            raise FileNotFoundError("El trabajo no tiene un video original.")
+        work_directory = Path(source_video_path).parent
+
+    local_video_path = local_source_video(
+        source_video_key,
+        source_video_path,
+        work_directory,
+    )
     return render_clip(
-        source_video_path=source_video_path,
+        source_video_path=local_video_path,
         segments=segments,
         clip_start=start_seconds,
         clip_end=end_seconds,
         output_directory=(
-            source_video_path.parent / "clips" / clip_id / "adjustment" / str(uuid4())
+            local_video_path.parent / "clips" / clip_id / "adjustment" / str(uuid4())
         ),
     )
 
 
 def process_job(job_id: str) -> None:
+    temporary_directory: TemporaryDirectory[str] | None = None
+    clips: list[ClipRecord] = []
     try:
         with Session(engine) as session:
             job = session.get(JobRecord, job_id)
@@ -424,15 +502,26 @@ def process_job(job_id: str) -> None:
             job.status = "transcribing"
             filename = job.original_filename
             source_video_path = job.source_video_path
+            source_video_key = job.source_video_key
             session.commit()
 
         if filename == "provocar-error.mp4":
             raise RuntimeError("Error de prueba controlado")
 
-        if source_video_path is None:
-            raise FileNotFoundError("El trabajo no tiene una ruta de video.")
+        if source_video_key is not None:
+            temporary_directory = TemporaryDirectory(prefix="clips-generator-")
+            work_directory = Path(temporary_directory.name)
+        elif source_video_path is not None:
+            work_directory = Path(source_video_path).parent
+        else:
+            raise FileNotFoundError("El trabajo no tiene un video original.")
 
-        text, segments = transcribe_video(source_video_path)
+        video_path = local_source_video(
+            source_video_key,
+            source_video_path,
+            work_directory,
+        )
+        text, segments = transcribe_video(str(video_path))
 
         with Session(engine) as session:
             job = session.get(JobRecord, job_id)
@@ -465,7 +554,6 @@ def process_job(job_id: str) -> None:
             for candidate in candidates
         }
 
-        clips = []
         for suggestion in suggestions:
             candidate = candidates_by_id[suggestion.candidate_id]
             clip = ClipRecord(
@@ -477,12 +565,17 @@ def process_job(job_id: str) -> None:
                 end_seconds=candidate.end_seconds,
                 decision="pending",
             )
-            render_clip(
-                source_video_path=Path(source_video_path),
+            output_path = render_clip(
+                source_video_path=video_path,
                 segments=segments,
                 clip_start=clip.start_seconds,
                 clip_end=clip.end_seconds,
-                output_directory=Path(source_video_path).parent / "clips" / clip.id,
+                output_directory=video_path.parent / "clips" / clip.id,
+            )
+            clip.rendered_video_key = publish_clip_assets(
+                job_id,
+                clip.id,
+                output_path,
             )
             clips.append(clip)
 
@@ -493,6 +586,18 @@ def process_job(job_id: str) -> None:
             session.commit()
 
     except Exception as error:
+        if r2_storage is not None:
+            for clip in clips:
+                if clip.rendered_video_key is None:
+                    continue
+                for key in (
+                    clip.rendered_video_key,
+                    clip_object_key(job_id, clip.id, "subtitles.srt"),
+                ):
+                    try:
+                        r2_storage.delete_object(key)
+                    except Exception as cleanup_error:
+                        print(f"No se pudo limpiar un objeto R2: {error_kind(cleanup_error)}")
         with Session(engine) as session:
             job = session.get(JobRecord, job_id)
 
@@ -500,10 +605,17 @@ def process_job(job_id: str) -> None:
                 job.status = "error"
                 session.commit()
 
-        print(f"El trabajo {job_id} falló: {error}")
+        print(f"El trabajo {job_id} falló: {error_kind(error)}")
+    finally:
+        if temporary_directory is not None:
+            try:
+                temporary_directory.cleanup()
+            except OSError as cleanup_error:
+                print(f"No se pudo limpiar el temporal: {error_kind(cleanup_error)}")
 
 def process_clip_adjustment(payload: bytes) -> None:
     task = None
+    published_video_key: str | None = None
     try:
         task = ClipAdjustmentTask.model_validate_json(payload)
         with Session(engine) as session:
@@ -522,33 +634,67 @@ def process_clip_adjustment(payload: bytes) -> None:
                 print(f"Se ignoró un ajuste antiguo o ya procesado: {task.adjustment_id}")
                 return
 
-        output = render_clip_adjustment(
-            job_id=task.job_id,
-            clip_id=task.clip_id,
-            start_seconds=task.start_seconds,
-            end_seconds=task.end_seconds,
+        workspace = (
+            TemporaryDirectory(prefix="clip-adjustment-", ignore_cleanup_errors=True)
+            if r2_storage is not None
+            else nullcontext(None)
         )
-        if not output.is_file():
-            raise FileNotFoundError("No se generó el MP4 ajustado.")
-
-        with Session(engine) as session:
-            session.execute(
-                update(ClipRecord)
-                .where(
-                    ClipRecord.id == task.clip_id,
-                    ClipRecord.adjustment_id == task.adjustment_id,
-                    ClipRecord.adjustment_status == "rendering",
-                )
-                .values(
-                    adjustment_status="ready",
-                    rendered_video_path=str(output.resolve()),
-                    start_seconds=task.start_seconds,
-                    end_seconds=task.end_seconds,
-                )
+        with workspace as temporary_path:
+            output = render_clip_adjustment(
+                job_id=task.job_id,
+                clip_id=task.clip_id,
+                start_seconds=task.start_seconds,
+                end_seconds=task.end_seconds,
+                work_directory=Path(temporary_path) if temporary_path is not None else None,
             )
-            session.commit()
-        print(f"El ajuste del clip {task.clip_id} se generó en {output}")
+            if not output.is_file():
+                raise FileNotFoundError("No se generó el MP4 ajustado.")
+
+            published_video_key = publish_clip_assets(
+                task.job_id,
+                task.clip_id,
+                output,
+                task.adjustment_id,
+            )
+            local_published_path = (
+                str(output.resolve()) if published_video_key is None else None
+            )
+            with Session(engine) as session:
+                result = session.execute(
+                    update(ClipRecord)
+                    .where(
+                        ClipRecord.id == task.clip_id,
+                        ClipRecord.adjustment_id == task.adjustment_id,
+                        ClipRecord.adjustment_status == "rendering",
+                    )
+                    .values(
+                        adjustment_status="ready",
+                        rendered_video_path=local_published_path,
+                        rendered_video_key=published_video_key,
+                        start_seconds=task.start_seconds,
+                        end_seconds=task.end_seconds,
+                    )
+                )
+                if result.rowcount != 1:
+                    raise RuntimeError("El ajuste ya no está activo.")
+                session.commit()
+            print(f"El ajuste del clip {task.clip_id} se publicó.")
+            published_video_key = None
     except Exception as error:
+        if published_video_key is not None and r2_storage is not None and task is not None:
+            for key in (
+                published_video_key,
+                clip_object_key(
+                    task.job_id,
+                    task.clip_id,
+                    "subtitles.srt",
+                    task.adjustment_id,
+                ),
+            ):
+                try:
+                    r2_storage.delete_object(key)
+                except Exception as cleanup_error:
+                    print(f"No se pudo limpiar un objeto R2: {error_kind(cleanup_error)}")
         if task is not None:
             try:
                 with Session(engine) as session:
@@ -564,12 +710,37 @@ def process_clip_adjustment(payload: bytes) -> None:
                     )
                     session.commit()
             except Exception as state_error:
-                print(f"No se pudo guardar el error del ajuste: {state_error}")
-        print(f"El ajuste de clip falló: {error}")
+                print(
+                    "No se pudo guardar el error del ajuste: "
+                    f"{error_kind(state_error)}"
+                )
+        print(f"El ajuste de clip falló: {error_kind(error)}")
 
 
 def run_worker() -> None:
+    next_cleanup_at = datetime.now(timezone.utc)
+
     while True:
+        current_time = datetime.now(timezone.utc)
+        if current_time >= next_cleanup_at:
+            try:
+                removed_directories = remove_expired_job_directories()
+                if removed_directories:
+                    print(
+                        "Se eliminaron "
+                        f"{len(removed_directories)} trabajos temporales vencidos."
+                    )
+            except OSError as error:
+                print(f"No se pudo limpiar archivos temporales: {error_kind(error)}")
+            if r2_storage is not None:
+                try:
+                    removed_r2_jobs = remove_expired_r2_jobs(r2_storage, now=current_time)
+                    if removed_r2_jobs:
+                        print(f"Se eliminaron {len(removed_r2_jobs)} trabajos vencidos de R2.")
+                except Exception as error:
+                    print(f"No se pudo limpiar R2: {error_kind(error)}")
+            next_cleanup_at = current_time + timedelta(days=1)
+
         queued_task = redis_client.blpop(["jobs", "clip_adjustments"], timeout=1)
 
         if queued_task is None:

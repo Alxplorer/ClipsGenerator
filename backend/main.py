@@ -1,16 +1,19 @@
 from typing import Literal, Self
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from botocore.exceptions import BotoCoreError, ClientError
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 import json
+import logging
 import psycopg
 import shutil
 from config import settings
 from uuid import uuid4
 from redis import Redis
 from redis.exceptions import RedisError
+from starlette.concurrency import run_in_threadpool
 
 from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import Session
@@ -18,16 +21,38 @@ from sqlalchemy.orm import Session
 from models import Clip as ClipRecord
 from models import Job as JobRecord
 from models import Transcription as TranscriptionRecord
+from object_storage import R2Storage, original_video_key
 from pathlib import Path
 
 
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 STORAGE_DIRECTORY = Path(__file__).parent / "storage" / "jobs"
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 engine = create_engine(settings.sqlalchemy_database_url)
 redis_client = Redis.from_url(settings.redis_url)
+r2_storage: R2Storage | None = None
+if settings.r2_configured:
+    r2_storage = R2Storage.connect(
+        account_id=settings.r2_account_id,
+        bucket_name=settings.r2_bucket_name,
+        access_key_id=settings.r2_access_key_id.get_secret_value(),
+        secret_access_key=settings.r2_secret_access_key.get_secret_value(),
+    )
+
+
+async def remove_uploaded_r2_object(key: str) -> None:
+    if r2_storage is None:
+        return
+    try:
+        await run_in_threadpool(r2_storage.delete_object, key)
+    except Exception as cleanup_error:
+        logger.warning(
+            "No se pudo limpiar un objeto R2: %s",
+            type(cleanup_error).__name__,
+        )
 
 app.add_middleware(
     CORSMiddleware,
@@ -194,7 +219,7 @@ def get_job(job_id: str) -> JobDetail:
         job = session.get(JobRecord, job_id)
 
         if job is None:
-            raise HTTPException(status_code=404, detail="Job not found")
+            raise HTTPException(status_code=404, detail="No se encontró el trabajo.")
 
         transcription_record = session.scalar(
             select(TranscriptionRecord).where(
@@ -239,8 +264,13 @@ def get_job(job_id: str) -> JobDetail:
             clips=clips,
         )
 
-@app.get("/jobs/{job_id}/clips/{clip_id}/video", response_class=FileResponse)
-def get_clip_video(job_id: str, clip_id: str, download: bool = False) -> FileResponse:
+@app.get("/jobs/{job_id}/clips/{clip_id}/video", response_model=None)
+def get_clip_video(
+    job_id: str,
+    clip_id: str,
+    download: bool = False,
+    range_header: str | None = Header(default=None, alias="Range"),
+) -> FileResponse | StreamingResponse:
     with Session(engine) as session:
         job = session.get(JobRecord, job_id)
         clip = session.get(ClipRecord, clip_id)
@@ -248,12 +278,56 @@ def get_clip_video(job_id: str, clip_id: str, download: bool = False) -> FileRes
         if job is None or clip is None or clip.job_id != job_id:
             raise HTTPException(status_code=404, detail="No se encontró el clip.")
 
-        if clip.rendered_video_path is not None:
+        video_key = clip.rendered_video_key
+        if video_key is not None:
+            video_path = None
+        elif clip.rendered_video_path is not None:
             video_path = Path(clip.rendered_video_path)
         elif job.source_video_path is not None:
             video_path = Path(job.source_video_path).parent / "clips" / clip.id / "clip.mp4"
         else:
             raise HTTPException(status_code=404, detail="El video no está disponible.")
+
+    if video_key is not None:
+        if r2_storage is None:
+            raise HTTPException(status_code=503, detail="El almacenamiento de videos no está disponible.")
+        try:
+            object_response = r2_storage.get_object(video_key, range_header)
+        except ClientError as error:
+            code = error.response.get("Error", {}).get("Code")
+            if code in {"NoSuchKey", "404", "NotFound"}:
+                raise HTTPException(status_code=404, detail="El video no está disponible.") from error
+            if code in {"InvalidRange", "416", "RequestedRangeNotSatisfiable"}:
+                raise HTTPException(status_code=416, detail="El rango solicitado no está disponible.") from error
+            logger.exception("No se pudo leer un clip de R2")
+            raise HTTPException(status_code=503, detail="El video no está disponible temporalmente.") from error
+        except BotoCoreError as error:
+            logger.exception("No se pudo conectar a R2")
+            raise HTTPException(status_code=503, detail="El video no está disponible temporalmente.") from error
+
+        body = object_response["Body"]
+
+        def video_chunks():
+            try:
+                yield from body.iter_chunks(chunk_size=1024 * 1024)
+            finally:
+                body.close()
+
+        headers = {
+            "Cache-Control": "no-store",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(object_response["ContentLength"]),
+        }
+        if "ContentRange" in object_response:
+            headers["Content-Range"] = object_response["ContentRange"]
+        if download:
+            headers["Content-Disposition"] = f'attachment; filename="clip-{clip_id}.mp4"'
+        return StreamingResponse(
+            video_chunks(),
+            status_code=206 if "ContentRange" in object_response else 200,
+            media_type="video/mp4",
+            headers=headers,
+        )
 
     if not video_path.is_file():
         raise HTTPException(status_code=404, detail="El video no está disponible.")
@@ -393,12 +467,12 @@ def retry_job(job_id: str) -> Job:
         job = session.get(JobRecord, job_id)
 
         if job is None:
-            raise HTTPException(status_code=404, detail="Job not found")
+            raise HTTPException(status_code=404, detail="No se encontró el trabajo.")
 
         if job.status != "error":
             raise HTTPException(
                 status_code=409,
-                detail="Only failed jobs can be retried",
+                detail="Solo se pueden reintentar trabajos que terminaron con error.",
             )
 
         job.status = "uploaded"
@@ -416,18 +490,41 @@ async def upload_job(file: UploadFile = File(...)) -> Job:
         file,
         job_id,
     )
+    source_video_key: str | None = None
+    if r2_storage is not None:
+        source_video_key = original_video_key(job_id)
+        try:
+            await run_in_threadpool(
+                r2_storage.upload_file,
+                source_video_path,
+                source_video_key,
+            )
+        except Exception as error:
+            await remove_uploaded_r2_object(source_video_key)
+            shutil.rmtree(source_video_path.parent)
+            raise HTTPException(
+                status_code=503,
+                detail="No se pudo guardar el video. Inténtalo de nuevo.",
+            ) from error
 
     job = JobRecord(
         id=job_id,
         original_filename=file.filename,
         status="uploaded",
         source_video_path=str(source_video_path),
+        source_video_key=source_video_key,
         file_size_bytes=file_size_bytes,
     )
 
-    with Session(engine) as session:
-        session.add(job)
-        session.commit()
+    try:
+        with Session(engine) as session:
+            session.add(job)
+            session.commit()
+    except Exception:
+        if r2_storage is not None and source_video_key is not None:
+            await remove_uploaded_r2_object(source_video_key)
+        shutil.rmtree(source_video_path.parent, ignore_errors=True)
+        raise
 
     redis_client.rpush("jobs", job_id)
     return Job(id=job_id, status="uploaded")

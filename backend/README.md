@@ -30,3 +30,13 @@ Desde la carpeta `backend`, puedes ejecutarlo en PowerShell con:
 
 En otro equipo o en producción, configura las rutas de ese entorno, o deja
 estas variables sin definir si ambos programas están disponibles en el `PATH`.
+
+## Archivos temporales
+
+Los videos originales, subtítulos y clips se conservan durante siete días desde
+el último cambio de su carpeta de trabajo. Al iniciar y después cada 24 horas,
+el worker elimina únicamente las carpetas vencidas dentro de `storage/jobs`.
+Los enlaces de esos trabajos dejan de estar disponibles después de la limpieza.
+Cuando se configura R2, el worker aplica el mismo plazo al conjunto de objetos
+de cada trabajo, tomando la fecha más reciente de sus objetos. La API entrega
+los clips desde R2 usando la clave guardada en PostgreSQL.

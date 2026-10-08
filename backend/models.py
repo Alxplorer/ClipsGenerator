@@ -15,6 +15,10 @@ class Job(Base):
         String(512),
         nullable=True,
     )
+    source_video_key: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+    )
     file_size_bytes: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
@@ -47,3 +51,4 @@ class Clip(Base):
     adjustment_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     adjustment_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     rendered_video_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    rendered_video_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
