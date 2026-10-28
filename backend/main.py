@@ -31,6 +31,7 @@ STORAGE_DIRECTORY = Path(__file__).parent / "storage" / "jobs"
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+settings.check_deployment("api")
 engine = create_engine(settings.sqlalchemy_database_url)
 redis_client = Redis.from_url(settings.redis_url)
 r2_storage: R2Storage | None = None
@@ -56,7 +57,7 @@ async def remove_uploaded_r2_object(key: str) -> None:
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[settings.frontend_origin],
     allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=[],
@@ -281,6 +282,8 @@ def get_clip_video(
         video_key = clip.rendered_video_key
         if video_key is not None:
             video_path = None
+        elif settings.render:
+            raise HTTPException(status_code=404, detail="El video no está disponible.")
         elif clip.rendered_video_path is not None:
             video_path = Path(clip.rendered_video_path)
         elif job.source_video_path is not None:
@@ -499,9 +502,10 @@ async def upload_job(file: UploadFile = File(...)) -> Job:
                 source_video_path,
                 source_video_key,
             )
+            shutil.rmtree(source_video_path.parent)
         except Exception as error:
             await remove_uploaded_r2_object(source_video_key)
-            shutil.rmtree(source_video_path.parent)
+            shutil.rmtree(source_video_path.parent, ignore_errors=True)
             raise HTTPException(
                 status_code=503,
                 detail="No se pudo guardar el video. Inténtalo de nuevo.",
@@ -511,7 +515,7 @@ async def upload_job(file: UploadFile = File(...)) -> Job:
         id=job_id,
         original_filename=file.filename,
         status="uploaded",
-        source_video_path=str(source_video_path),
+        source_video_path=str(source_video_path) if source_video_key is None else None,
         source_video_key=source_video_key,
         file_size_bytes=file_size_bytes,
     )

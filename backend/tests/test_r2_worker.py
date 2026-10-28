@@ -21,7 +21,7 @@ with patch.dict(
         "OPENAI_API_KEY": "test-key",
     },
 ):
-    from worker import ClipCandidate, ClipSuggestion, process_job, process_clip_adjustment
+    from worker import ClipCandidate, ClipSuggestion, local_source_video, process_job, process_clip_adjustment
 
 
 class FakeR2:
@@ -57,13 +57,18 @@ class R2WorkerTests(unittest.TestCase):
                 id=self.job_id,
                 original_filename="episodio.mp4",
                 status="uploaded",
-                source_video_path="C:/api-only/original.mp4",
+                source_video_path=None,
                 source_video_key=self.original_key,
             ))
             session.commit()
 
     def tearDown(self) -> None:
         self.engine.dispose()
+
+    def test_render_worker_rejects_api_local_path_without_r2_key(self) -> None:
+        with patch("worker.settings.render", True):
+            with self.assertRaisesRegex(FileNotFoundError, "clave R2"):
+                local_source_video(None, "C:/api-only/original.mp4", Path("C:/worker-temp"))
 
     def test_processes_from_r2_without_shared_disk(self) -> None:
         segments = [{"start_seconds": 0.0, "end_seconds": 30.0, "text": "Ejemplo"}]

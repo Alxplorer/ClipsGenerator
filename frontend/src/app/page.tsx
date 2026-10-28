@@ -2,6 +2,9 @@
 
 import { type FormEvent, useEffect, useState } from 'react';
 
+const apiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000')
+  .replace(/\/+$/, '');
+
 type JobStatus = 'uploaded' | 'transcribing' | 'generating' | 'ready' | 'error';
 
 type ApiJob = {
@@ -104,7 +107,7 @@ export default function Home() {
   setApiJobError(null);
 
   try {
-    const response = await fetch('http://localhost:8000/jobs/upload', {
+    const response = await fetch(`${apiBaseUrl}/jobs/upload`, {
       method: 'POST',
       body: formData,
     });
@@ -144,7 +147,7 @@ useEffect(() => {
   async function loadJobStatus() {
     try {
       const response = await fetch(
-        `http://localhost:8000/jobs/${jobId}`,
+        `${apiBaseUrl}/jobs/${jobId}`,
       );
 
       if (!response.ok) {
@@ -219,7 +222,7 @@ async function setClipDecision(id: string, decision: 'accepted' | 'discarded') {
 
   try {
     const response = await fetch(
-      `http://localhost:8000/jobs/${apiJob.id}/clips/${id}/decision`,
+      `${apiBaseUrl}/jobs/${apiJob.id}/clips/${id}/decision`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -264,7 +267,7 @@ async function saveClipAdjustment() {
 
   try {
     const response = await fetch(
-      `http://localhost:8000/jobs/${apiJob.id}/clips/${reviewClip.id}/trim`,
+      `${apiBaseUrl}/jobs/${apiJob.id}/clips/${reviewClip.id}/trim`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -439,7 +442,7 @@ function openReview(clip: ClipProposal) {
             playsInline
             preload="metadata"
             aria-label={`Vista previa de ${clip.title}`}
-            src={`http://localhost:8000/jobs/${apiJob?.id}/clips/${clip.id}/video?version=${clip.startSeconds}-${clip.endSeconds}`}
+            src={`${apiBaseUrl}/jobs/${apiJob?.id}/clips/${clip.id}/video?version=${clip.startSeconds}-${clip.endSeconds}`}
             className="mx-auto my-4 aspect-[9/16] w-full max-w-xs rounded-lg bg-black"
           >
             Tu navegador no admite la reproducción de video.
@@ -475,7 +478,7 @@ function openReview(clip: ClipProposal) {
     Revisar clip
   </button>
   <a
-    href={`http://localhost:8000/jobs/${apiJob?.id}/clips/${clip.id}/video?download=true&version=${clip.startSeconds}-${clip.endSeconds}`}
+    href={`${apiBaseUrl}/jobs/${apiJob?.id}/clips/${clip.id}/video?download=true&version=${clip.startSeconds}-${clip.endSeconds}`}
     className="ml-3 inline-block rounded-full border border-violet-300 px-4 py-2 text-sm font-semibold text-violet-700"
   >
     {clip.adjustmentStatus === 'queued' || clip.adjustmentStatus === 'rendering'
@@ -544,7 +547,7 @@ function openReview(clip: ClipProposal) {
     </button>
 
     <a
-      href={`http://localhost:8000/jobs/${apiJob?.id}/clips/${reviewClip.id}/video?download=true&version=${reviewClip.startSeconds}-${reviewClip.endSeconds}`}
+      href={`${apiBaseUrl}/jobs/${apiJob?.id}/clips/${reviewClip.id}/video?download=true&version=${reviewClip.startSeconds}-${reviewClip.endSeconds}`}
       className="ml-3 inline-block rounded-full border border-violet-300 px-5 py-3 font-semibold text-violet-700"
     >
       {isReviewBusy ? 'Descargar versión actual' : 'Descargar clip'}

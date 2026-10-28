@@ -20,6 +20,8 @@ from models import Transcription as TranscriptionRecord
 from models import Clip as ClipRecord
 from object_storage import R2Storage, clip_object_key
 
+settings.check_deployment("worker")
+openai_api_key = settings.worker_openai_api_key
 engine = create_engine(settings.sqlalchemy_database_url)
 redis_client = Redis.from_url(settings.redis_url)
 r2_storage: R2Storage | None = None
@@ -54,6 +56,8 @@ def local_source_video(
         r2_storage.download_file(source_video_key, local_path)
         return local_path
 
+    if settings.render:
+        raise FileNotFoundError("El trabajo no tiene una clave R2 para el video original.")
     if source_video_path is None:
         raise FileNotFoundError("El trabajo no tiene un video original.")
     return Path(source_video_path)
@@ -157,7 +161,7 @@ def build_clip_candidates(
 def select_clip_suggestions(
     candidates: list[ClipCandidate],
 ) -> list[ClipSuggestion]:
-    client = OpenAI(api_key=settings.openai_api_key.get_secret_value())
+    client = OpenAI(api_key=openai_api_key)
 
     completion = client.chat.completions.parse(
         model="gpt-5.6-terra",
@@ -410,7 +414,7 @@ def transcribe_video(source_video_path: str) -> tuple[str, list[dict[str, float 
                 "El audio supera los 25 MB permitidos por la API de transcripción."
             )
 
-        client = OpenAI(api_key=settings.openai_api_key.get_secret_value())
+        client = OpenAI(api_key=openai_api_key)
 
         with audio_path.open("rb") as audio_file:
             result = client.audio.transcriptions.create(

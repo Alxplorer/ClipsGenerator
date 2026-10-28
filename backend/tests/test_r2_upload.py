@@ -86,7 +86,9 @@ class R2UploadTests(unittest.IsolatedAsyncioTestCase):
                 job = session.get(Job, response.id)
                 self.assertIsNotNone(job)
                 self.assertEqual(job.source_video_key, f"jobs/{response.id}/original.mp4")
+                self.assertIsNone(job.source_video_path)
                 self.assertEqual(self.storage.objects[job.source_video_key], b"MP4 de prueba")
+            self.assertEqual(list(Path(temporary_directory).iterdir()), [])
             self.assertEqual(self.redis.messages, [("jobs", response.id)])
 
     async def test_failed_r2_upload_does_not_save_or_queue_job(self) -> None:

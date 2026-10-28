@@ -136,3 +136,15 @@ class R2VideoTests(unittest.TestCase):
         response = self.client.get(f"/jobs/{self.job_id}/clips/{self.clip_id}/video")
 
         self.assertEqual(response.status_code, 404)
+
+    def test_render_api_does_not_serve_local_clip_path(self) -> None:
+        with Session(self.engine) as session:
+            clip = session.get(Clip, self.clip_id)
+            clip.rendered_video_key = None
+            session.commit()
+
+        with patch("main.settings.render", True):
+            response = self.client.get(f"/jobs/{self.job_id}/clips/{self.clip_id}/video")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(self.storage.requests, [])

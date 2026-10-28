@@ -7,6 +7,8 @@ from models import Base
 
 from alembic import context
 
+settings.check_deployment("api")
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
