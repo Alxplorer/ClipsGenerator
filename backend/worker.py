@@ -3,6 +3,7 @@ from contextlib import nullcontext
 from tempfile import TemporaryDirectory
 from typing import Literal
 from datetime import datetime, timedelta, timezone
+from time import sleep
 import subprocess
 import json
 from pydantic import BaseModel, Field
@@ -10,6 +11,7 @@ from uuid import uuid4
 
 from openai import OpenAI
 from redis import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
 from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import Session
 
@@ -745,7 +747,16 @@ def run_worker() -> None:
                     print(f"No se pudo limpiar R2: {error_kind(error)}")
             next_cleanup_at = current_time + timedelta(days=1)
 
-        queued_task = redis_client.blpop(["jobs", "clip_adjustments"], timeout=1)
+        try:
+            queued_task = redis_client.blpop(["jobs", "clip_adjustments"], timeout=1)
+        except (RedisConnectionError, RedisTimeoutError) as error:
+            print(
+                f"Conexión con la cola interrumpida ({error_kind(error)}). "
+                "Nuevo intento en 5 segundos.",
+                flush=True,
+            )
+            sleep(5)
+            continue
 
         if queued_task is None:
             continue

@@ -197,6 +197,12 @@ simular Render, el build debe fallar. Estos comandos no conectan con R2 ni
 crean servicios; las credenciales y la conectividad reales se comprobarán al
 desplegar.
 
+El worker captura errores de conexión y timeout al esperar encargos de Redis:
+registra solo el tipo de error, espera cinco segundos y vuelve a consultar.
+`Ctrl+C` sigue deteniéndolo. Esto mantiene vivo el consumidor ante cortes
+temporales; no garantiza recuperar mensajes perdidos si Redis se reinicia o
+si un encargo fue retirado de la cola antes de perderse la respuesta de red.
+
 ## Detener los servicios
 
 Detén la API, el worker y Next.js con `Ctrl+C` en sus terminales. Para detener
